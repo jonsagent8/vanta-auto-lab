@@ -27,3 +27,7 @@ partshot.mjs
 g42-profile.json
 models/m240i-glb.js
 .DS_Store
+live.png
+tex-src/
+dirtyviews.mjs
+live.mjs

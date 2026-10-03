@@ -119,6 +119,76 @@ function buildBody(NU = 420, M = 96) {
   return { body, glass, pos, nrm: nrm.array };
 }
 
+// ---------------- road grime ----------------
+// One packed CC0 texture (ambientCG): R = vertical grime streaks, G = blotchy smudge/dust, B = drips, A = debris flecks.
+// Projected triplanar in car space (the model has no UVs) and layered by where dirt really collects on a car.
+const GRIME_WX = [-1.287, 1.439];
+const GRIME_GLSL = `
+uniform sampler2D uGrime;
+vec4 triG(vec3 p, vec3 n, float s) {
+  vec3 w = pow(abs(n), vec3(6.)); w /= max(dot(w, vec3(1.)), 1e-4);
+  return texture2D(uGrime, p.zy * s) * w.x + texture2D(uGrime, p.xz * s) * w.y + texture2D(uGrime, vec2(p.x, p.y) * s) * w.z;
+}
+// rgb = grime colour, a = coverage. lift > 0 lightens it for dark parts (dust shows pale on black plastic).
+vec4 grimeLayer(vec3 p, vec3 n, float dirt, float rinse, float lift) {
+  float k = dirt * (1. - smoothstep(rinse - .06, rinse + .06, p.x));
+  if (k <= .001) return vec4(0.);
+  vec4 g1 = triG(p, n, .85), g2 = triG(p * 1.7 + 3.1, n, 1.4);
+  float up = smoothstep(.4, .85, n.y), side = 1. - smoothstep(.5, .8, abs(n.y));
+  float low = smoothstep(.8, .16, p.y);
+  float wheel = max(smoothstep(.95, .38, length(vec2(p.x - (${GRIME_WX[0].toFixed(3)} - .3), p.y - .32))),
+                    smoothstep(.95, .38, length(vec2(p.x - (${GRIME_WX[1].toFixed(3)} - .3), p.y - .32))));
+  float spray = (low * .9 + wheel * .7) * (.35 + 1.1 * g1.g);
+  spray = smoothstep(.12, .88, spray + (g1.r - .45) * .35 * (1. - low));
+  float runs = side * smoothstep(1.0, .6, p.y) * smoothstep(.12, .45, p.y) * smoothstep(.26, .52, g1.r) * (.55 + .45 * g2.b);
+  float dust = up * smoothstep(.15, .7, g1.g * .8 + .25);
+  float fleck = smoothstep(.42, .62, g2.a) * clamp(low * .9 + wheel, 0., 1.);
+  vec3 dustC = mix(vec3(.5, .45, .38), vec3(.5, .46, .4), lift);
+  vec3 grimeC = mix(vec3(.23, .19, .145), vec3(.36, .32, .27), lift) * (.8 + .4 * g2.g);
+  vec3 mudC = mix(vec3(.17, .13, .09), vec3(.3, .25, .19), lift);
+  vec3 c = dustC; float a = dust * .6;
+  c = mix(c, grimeC, spray); a = max(a, spray * .94);
+  c = mix(c, grimeC * .9, runs); a = max(a, runs * .8);
+  c = mix(c, mudC, fleck); a = max(a, fleck * .97);
+  return vec4(c, clamp(a * k, 0., 1.));
+}
+`;
+// Adds the grime layer (and part-specific dirt) to any standard/physical material. kind: trim | tire | rim | lens | glass
+function grimify(mat, U, kind) {
+  const prev = mat.onBeforeCompile;
+  mat.customProgramCacheKey = () => 'grime-' + kind;
+  mat.onBeforeCompile = (sh, r) => {
+    prev && prev(sh, r);
+    sh.uniforms.uDirt = U.uDirt; sh.uniforms.uRinse = U.uRinse; sh.uniforms.uGrime = U.uGrime;
+    sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying vec3 vGP; varying vec3 vGN;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvGP = position; vGN = normal;');
+    const lift = kind === 'trim' ? '.3' : kind === 'tire' ? '.2' : '0.';
+    let body = `vec4 gl = grimeLayer(vGP, normalize(vGN), uDirt, uRinse, ${lift});`;
+    if (kind === 'rim') body += `
+      vec4 bd = triG(vGP * 2.3, normalize(vGN), 1.); float clean = 1. - smoothstep(uRinse - .06, uRinse + .06, vGP.x);
+      gl = vec4(vec3(.12, .095, .07) * (.7 + .6 * bd.g), clamp(uDirt * clean * (.5 + .35 * bd.g), 0., 1.));`;
+    if (kind === 'tire') body += `\n      gl.a *= .65;`;
+    if (kind === 'lens') body += `\n      gl.a = max(gl.a, uDirt * (1. - smoothstep(uRinse - .06, uRinse + .06, vGP.x)) * .35);`;
+    if (kind === 'glass') body += `
+      vec3 gn = normalize(vGN); float clean = 1. - smoothstep(uRinse - .06, uRinse + .06, vGP.x);
+      vec4 gg = triG(vGP, gn, .9);
+      float haze = uDirt * clean * (.35 + .65 * gg.g) * (.55 + .45 * smoothstep(.3, .9, gn.y));
+      float wipe = 0.;
+      if (vGP.x > .3 && gn.x > .25) {   // windshield: two clean wiper arcs
+        wipe = max(smoothstep(.64, .6, length(vec2(vGP.x - 1.14, vGP.z + .46))), smoothstep(.62, .58, length(vec2(vGP.x - 1.14, vGP.z - .14)))) * step(vGP.x, 1.14);
+      }
+      haze *= 1. - .88 * wipe;
+      haze = max(haze, uDirt * clean * smoothstep(.55, .8, gg.b) * .6 * (1. - wipe));   // dried water spots
+      gl = vec4(vec3(.58, .54, .47), clamp(haze, 0., 1.));`;
+    sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nvarying vec3 vGP; varying vec3 vGN; uniform float uDirt, uRinse;\n' + GRIME_GLSL)
+      .replace('#include <color_fragment>', `#include <color_fragment>\n  ${body}\n  diffuseColor.rgb = mix(diffuseColor.rgb, gl.rgb, gl.a);` + (kind === 'glass' ? '\n  diffuseColor.a = mix(diffuseColor.a, .93, gl.a * .8);' : ''))
+      .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\n  roughnessFactor = mix(roughnessFactor, ' + (kind === 'glass' ? '.55' : '.95') + ', gl.a);')
+      .replace('#include <metalnessmap_fragment>', '#include <metalnessmap_fragment>\n  metalnessFactor = mix(metalnessFactor, 0., gl.a);')
+      .replace('#include <lights_physical_fragment>', '#include <lights_physical_fragment>\n#ifdef USE_CLEARCOAT\n  material.clearcoat *= 1. - gl.a;\n#endif');
+  };
+  mat.needsUpdate = true;
+}
+
 // ---------------- paint shader (wrap wipe, dirt, PPF hex scan, impacts, cursor polish trail) ----------------
 const TRAIL = 14;
 function paintMaterial(real = false, shared = null) {
@@ -138,6 +208,7 @@ function paintMaterial(real = false, shared = null) {
 varying vec3 vP; varying vec3 vNo;
 uniform vec3 uColA, uColB; uniform float uWipe, uWipeGlow, uDirt, uRinse, uScan, uScanOn, uFilm, uTime;
 uniform vec4 uImp[4]; uniform vec4 uTrail[${TRAIL}];
+${GRIME_GLSL}
 float aoG = 1.0, dmG = 0.0, tmG = 0.0, trR = .2, trM = 0., trCC = 1.; vec3 lampE = vec3(0.);
 float rbox(vec2 p, vec2 b, float r){ vec2 q = abs(p) - b + r; return length(max(q, 0.)) + min(max(q.x, q.y), 0.) - r; }
 float inside(float d){ return 1. - smoothstep(-.002, .003, d); }
@@ -208,13 +279,10 @@ vec3 film(float t){ return .5 + .5 * cos(6.2831 * (vec3(0., .33, .67) + t)); }`)
   tmG = tm; trCC = 1.;
   diffuseColor.rgb = mix(diffuseColor.rgb, tc, tmG);
 #endif
-  float dn = fbm3(vP * vec3(3.2, 4.5, 3.2));
-  float low = 1. - smoothstep(.25, 1.25, vP.y);
-  float dm = uDirt * smoothstep(.3, .62, dn * .9 + low * .45) * (.55 + .45 * low);
-  dm *= 1. - smoothstep(uRinse - .06, uRinse + .06, vP.x);
-  dmG = clamp(dm, 0., 1.);
-  diffuseColor.rgb = mix(diffuseColor.rgb, vec3(.31, .25, .18) * (.65 + .7 * dn), dmG);`)
-      .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\n  roughnessFactor = mix(mix(roughnessFactor, trR, tmG), .92, dmG);')
+  vec4 gl = grimeLayer(vP, normalize(vNo), uDirt, uRinse, 0.);
+  dmG = gl.a;
+  diffuseColor.rgb = mix(diffuseColor.rgb, gl.rgb, dmG);`)
+      .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\n  roughnessFactor = mix(mix(roughnessFactor, trR, tmG), .95, dmG);')
       .replace('#include <aomap_fragment>', '#include <aomap_fragment>\n  reflectedLight.indirectDiffuse *= aoG; reflectedLight.indirectSpecular *= mix(1., aoG, .85); reflectedLight.directDiffuse *= mix(1., aoG, .5);')
       .replace('#include <metalnessmap_fragment>', '#include <metalnessmap_fragment>\n  metalnessFactor = mix(metalnessFactor, trM, tmG);')
       .replace('#include <lights_physical_fragment>', '#include <lights_physical_fragment>\n  \n#ifdef USE_CLEARCOAT\n  material.clearcoat = mix(material.clearcoat, trCC, tmG) * (1. - dmG);\n#endif')
@@ -360,6 +428,10 @@ export function createStage(canvas, { mobile = false } = {}) {
   };
   const PU = mats.paint.userData.u;
   mats.paintReal = paintMaterial(true, PU);
+  const grimeTex = new THREE.TextureLoader().load('textures/grime.webp');
+  grimeTex.wrapS = grimeTex.wrapT = THREE.RepeatWrapping; grimeTex.colorSpace = THREE.NoColorSpace; grimeTex.anisotropy = 8;
+  PU.uGrime = { value: grimeTex };
+  grimify(mats.glass, PU, 'glass');
 
   // car
   const geo = buildBody();
@@ -442,6 +514,8 @@ export function createStage(canvas, { mobile = false } = {}) {
     chrome: new THREE.MeshPhysicalMaterial({ color: 0x0d0e11, roughness: .38, metalness: .6, clearcoat: .6, clearcoatRoughness: .1, envMapIntensity: 1 }),
     taillight: new THREE.MeshPhysicalMaterial({ color: 0x5a0008, roughness: .14, metalness: 0, clearcoat: 1, clearcoatRoughness: .02, emissive: 0xff1428, emissiveIntensity: .75 }),
   };
+  grimify(PART_MATS.trim, PU, 'trim'); grimify(PART_MATS.chrome, PU, 'trim'); grimify(PART_MATS.tire, PU, 'tire');
+  grimify(PART_MATS.rim, PU, 'rim'); grimify(PART_MATS.headlight, PU, 'lens'); grimify(PART_MATS.taillight, PU, 'lens');
   const toFloat = a => { const out = new Float32Array(a.count * a.itemSize); for (let i = 0; i < a.count; i++) for (let k = 0; k < a.itemSize; k++) out[i * a.itemSize + k] = a.getComponent(i, k); return new THREE.BufferAttribute(out, a.itemSize); };
   // window.VANTA_MODEL_URL may point at a .js module exporting the GLB as base64 (used where .glb files can't be served)
   const MODEL_URL = window.VANTA_MODEL_URL || 'models/m240i.glb', loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);

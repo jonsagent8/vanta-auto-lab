@@ -119,6 +119,7 @@ function tick() {
   const pw = P[1];
   S.dirt = ss(0, .12, pw); S.foam = ss(.13, .4, pw); S.rinse = lerp(3.2, -3.2, ss(.45, .8, pw));
   S.sweep = pw > .8 && pw < 1 ? (pw - .8) / .2 : -1;
+  if (window.__dirt != null) { S.dirt = window.__dirt; S.foam = 0; S.rinse = 3.2; }
   steps.forEach(li => li.classList.toggle('on', pw >= +li.dataset.at));
 
   // interior

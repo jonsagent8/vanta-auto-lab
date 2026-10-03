@@ -14,6 +14,7 @@ Static site, no build step: open it through any web server (or GitHub Pages). `t
 - `models/m240i.glb`: the car, preprocessed by `process-model.mjs` (Meshopt-compressed)
 
 ## Credits
-3D car: ["2022 BMW M240i Coupe"](https://sketchfab.com/3d-models/2022-bmw-m240i-coupe-822a4e2d8a0e4568beda00539f4ad341) by Nazh Design, licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Recolored, re-scaled and split into parts.
+- Road grime: CC0 textures from [ambientCG](https://ambientcg.com) (SurfaceImperfections003/013/014, Leaking019B), packed into `textures/grime.webp` and projected triplanar.
+- 3D car: ["2022 BMW M240i Coupe"](https://sketchfab.com/3d-models/2022-bmw-m240i-coupe-822a4e2d8a0e4568beda00539f4ad341) by Nazh Design, licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Recolored, re-scaled and split into parts.
 
 Business name, address, phone, email and prices are placeholders. The booking form posts to `window.VANTA_FORM_ENDPOINT` when set (for example, a Formspree URL).
